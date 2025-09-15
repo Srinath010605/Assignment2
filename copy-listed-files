@@ -1,1 +1,172 @@
+#!/usr/bin/env python3
+"""
+copy_listed_files.py
+
+Search for a list of filenames under a root directory and copy each file (if found)
+into a subfolder of an output directory. The subfolder is named after the file (without
+its extension).
+
+Usage:
+    python3 copy_listed_files.py \
+        --root /home/vsysuser/workspace/ASSIGNMENTS/Assignment2/test_root \
+        --file-list /home/vsysuser/workspace/ASSIGNMENTS/Assignment2/file_list.txt \
+        --output /home/vsysuser/workspace/ASSIGNMENTS/Assignment2/output \
+        [--copy-all] [--verbose]
+
+file_list.txt format (one filename per line):
+    file1.txt
+    file2.zip
+    # comment lines starting with # are ignored
+
+Behavior summary:
+  - Walks the root directory once and indexes filenames -> paths.
+  - For each filename in file_list.txt:
+      - If not found: prints a warning.
+      - If found:
+          - Creates a folder named after the filename (no extension) in the output dir.
+          - Copies the file there (preserving metadata using shutil.copy2).
+          - If --copy-all is provided and multiple matches exist, creates occurrence_N
+            subfolders for each match and copies them.
+
+This script is written to be easy to read and modify for beginners.
+"""
+
+import argparse
+import os
+import shutil
+import sys
+from typing import Dict, List
+
+
+def read_file_list(path: str) -> List[str]:
+    """Read the file list file and return a list of filenames (skip comments/empty).
+    Filenames should include their extension (e.g. "notes.txt").
+    """
+    with open(path, 'r', encoding='utf-8') as fh:
+        lines = [line.strip() for line in fh if line.strip() and not line.strip().startswith('#')]
+    return lines
+
+
+def index_files(root_dir: str) -> Dict[str, List[str]]:
+    """Walk root_dir once and return a dict mapping basename -> list of full paths.
+    Example: mapping['file1.txt'] = ['/root/a/file1.txt', '/root/b/file1.txt']
+    """
+    mapping: Dict[str, List[str]] = {}
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        for fname in filenames:
+            mapping.setdefault(fname, []).append(os.path.join(dirpath, fname))
+    return mapping
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def unique_dest(dest: str) -> str:
+    """If dest already exists, return a new path by appending _1, _2, ... before the extension.
+    Example: /out/file.txt -> /out/file_1.txt if file.txt exists.
+    """
+    if not os.path.exists(dest):
+        return dest
+    base, ext = os.path.splitext(dest)
+    counter = 1
+    while True:
+        candidate = f"{base}_{counter}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1
+
+
+def copy_file_to_folder(src: str, dest_folder: str) -> str:
+    """Copy src into dest_folder. Return the destination path used."""
+    ensure_dir(dest_folder)
+    dest_path = os.path.join(dest_folder, os.path.basename(src))
+    dest_path = unique_dest(dest_path)
+    shutil.copy2(src, dest_path)
+    return dest_path
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description='Copy a list of files (searching under a root directory)')
+    p.add_argument('--root', '-r', required=True, help='Root directory to search (walk recursively)')
+    p.add_argument('--file-list', '-f', required=True, help='Text file with one filename per line')
+    p.add_argument('--output', '-o', required=True, help='Output directory where subfolders will be created')
+    p.add_argument('--copy-all', action='store_true', help='If set, copy all matches. Otherwise copy only the first match.')
+    p.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    root = os.path.abspath(args.root)
+    file_list_path = os.path.abspath(args.file_list)
+    output_dir = os.path.abspath(args.output)
+
+    if not os.path.isdir(root):
+        print(f"ERROR: root directory does not exist: {root}")
+        sys.exit(2)
+    if not os.path.isfile(file_list_path):
+        print(f"ERROR: file-list does not exist: {file_list_path}")
+        sys.exit(2)
+
+    ensure_dir(output_dir)
+
+    filenames = read_file_list(file_list_path)
+    if args.verbose:
+        print(f"Read {len(filenames)} filenames from {file_list_path}")
+
+    print("Indexing files under root (this may take a moment if the tree is large)...")
+    index = index_files(root)
+    if args.verbose:
+        total_indexed = sum(len(v) for v in index.values())
+        print(f"Indexed {total_indexed} files (unique basenames: {len(index)})")
+
+    found_count = 0
+    not_found = []
+
+    for fname in filenames:
+        matches = index.get(fname, [])
+        base_folder_name = os.path.splitext(fname)[0]
+        dest_folder = os.path.join(output_dir, base_folder_name)
+
+        if not matches:
+            print(f"WARNING: '{fname}' not found under {root}")
+            not_found.append(fname)
+            continue
+
+        # At least one match found
+        if args.copy_all and len(matches) > 1:
+            # Copy each match into occurrence_N subfolders so they don't overwrite each other
+            for i, src in enumerate(matches, start=1):
+                occ_folder = os.path.join(dest_folder, f"occurrence_{i}")
+                try:
+                    dest = copy_file_to_folder(src, occ_folder)
+                    print(f"Copied: {src} -> {dest}")
+                    found_count += 1
+                except Exception as e:
+                    print(f"ERROR copying {src}: {e}")
+        else:
+            # Copy only the first match
+            src = matches[0]
+            try:
+                dest = copy_file_to_folder(src, dest_folder)
+                print(f"Copied: {src} -> {dest}")
+                found_count += 1
+                if len(matches) > 1:
+                    print(f"  Note: {len(matches)} matches found for '{fname}'. Copied the first match: {matches[0]}")
+            except Exception as e:
+                print(f"ERROR copying {src}: {e}")
+
+    print('\nSummary:')
+    print(f"  Files copied: {found_count}")
+    print(f"  Files not found: {len(not_found)}")
+    if not_found:
+        print("  Not found list:")
+        for nf in not_found:
+            print(f"    - {nf}")
+
+
+if __name__ == '__main__':~
+    main()
 
